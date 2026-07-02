@@ -1,0 +1,133 @@
+`timescale 1ns / 1ps
+
+module advanced_elevator_tb;
+
+    // Testbench Inputs (Signals driven into the UUT)
+    reg clk;
+    reg reset;
+    reg emergency_stop;
+    reg [3:0] car_req;
+    reg [2:0] hall_req_up;
+    reg [3:1] hall_req_down;
+    reg sensor_G, sensor_1, sensor_2, sensor_3;
+
+    // Testbench Outputs (Signals monitored from the UUT)
+    wire motor_up;
+    wire motor_down;
+    wire motor_stop;
+    wire door_open;
+    wire [1:0] current_floor_out;
+
+    // Instantiate the Unit Under Test (UUT)
+    advanced_elevator uut (
+        .clk(clk), 
+        .reset(reset), 
+        .emergency_stop(emergency_stop), 
+        .car_req(car_req), 
+        .hall_req_up(hall_req_up), 
+        .hall_req_down(hall_req_down), 
+        .sensor_G(sensor_G), 
+        .sensor_1(sensor_1), 
+        .sensor_2(sensor_2), 
+        .sensor_3(sensor_3), 
+        .motor_up(motor_up), 
+        .motor_down(motor_down), 
+        .motor_stop(motor_stop), 
+        .door_open(door_open), 
+        .current_floor_out(current_floor_out)
+    );
+
+    // Clock Generator: 50 MHz Clock (20ns Period)
+    always #10 clk = ~clk;
+
+    // Helper task to clear momentary button presses safely
+    task clear_buttons;
+        begin
+            car_req       = 4'b0000;
+            hall_req_up   = 3'b000;
+            hall_req_down = 3'b000;
+        end
+    endtask
+
+    initial begin
+        // --- 1. INITIALIZATION ---
+        clk = 0;
+        reset = 0;
+        emergency_stop = 0;
+        clear_buttons();
+        
+        // Start physically at Floor 2 to test the Ground Floor Priority rule later
+        sensor_G = 0; sensor_1 = 0; sensor_2 = 1; sensor_3 = 0; 
+
+        $display("[TIME %0t] --- Step 1: Applying Global Reset ---", $time);
+        reset = 1; #20; reset = 0; #20;
+
+        // --- 2. MULTI-USER QUEUE & PRIORITY TESTING ---
+        // Scenario: Car is at Floor 2. User A wants to go to Floor 3. User B presses DOWN at Floor 0.
+        $display("[TIME %0t] --- Step 2: Triggering Simultaneous Requests ---", $time);
+        $display("[TIME %0t] Action: Car Request for F3, Hall Request DOWN at Floor 0", $time);
+        car_req[3] = 1;
+        hall_req_up[0] = 1; // Ground Floor call
+        #20;
+        clear_buttons(); // Clear physical button bounce; FSM internal memory registry holds them
+        #20;
+
+        // Check if Ground priority was asserted
+        if (motor_down) 
+            $display("[TIME %0t] PASS: Ground floor priority verified! Motor driving DOWN from Floor 2.", $time);
+        else 
+            $display("[TIME %0t] FAIL: Priority failed. Motor should be driving DOWN.", $time);
+
+        // --- 3. SIMULATING THE TRAFFIC SHAFTS ---
+        $display("[TIME %0t] --- Step 3: Travelling Downward to Ground Floor ---", $time);
+        sensor_2 = 0; #40; // Leaves Floor 2
+        
+        $display("[TIME %0t] Passing Floor 1...", $time);
+        sensor_1 = 1; #20; sensor_1 = 0; #40;
+
+        $display("[TIME %0t] Arriving at Ground Floor...", $time);
+        sensor_G = 1; #40; // Trip Ground sensor. Motor should stop, doors open.
+        
+        // --- 4. STEPPING BACK UPWAY & TESTING DIRECTION MATCHING ---
+        // Inside cabin passenger wants to go to Floor 3 now.
+        $display("[TIME %0t] Passenger boards at Ground, requests Floor 3.", $time);
+        car_req[3] = 1; #20; clear_buttons(); #40;
+        
+        sensor_G = 0; #40; // Leaves Ground Floor, travelling UP
+
+        // While moving up, an intermediate passenger calls from Floor 1 going UP
+        $display("[TIME %0t] New Request: Passenger at Floor 1 calls UP.", $time);
+        hall_req_up[1] = 1; #20; clear_buttons();
+
+        $display("[TIME %0t] Arriving at Floor 1...", $time);
+        sensor_1 = 1; #40; // Stops to pick up Floor 1 passenger
+        sensor_1 = 0; #40; // Resumes journey up
+
+        // --- 5. TESTING EMERGENCY SNAPSHOT RECOVERY ---
+        $display("[TIME %0t] --- Step 4: Triggering Emergency Stop Mid-Transit ---", $time);
+        emergency_stop = 1;
+        #60; // Confirm motor cuts out instantly and doors lock shut
+
+        $display("[TIME %0t] Clearing Emergency. Restoring operations via saved_state...", $time);
+        emergency_stop = 0;
+        #40; // Let FSM calculate and spin motor back up
+
+        // Moving past Floor 2. Note: Our logic dictates we bypass it if there's no matching direction request!
+        $display("[TIME %0t] Passing Floor 2...", $time);
+        sensor_2 = 1; #20; sensor_2 = 0; #40;
+
+        // Arriving at destination (Floor 3)
+        $display("[TIME %0t] Arriving at destination Floor 3...", $time);
+        sensor_3 = 1; #40;
+
+        $display("[TIME %0t] --- Simulation Cycle Complete ---", $time);
+        $finish;
+    end
+
+    // Monitor Block: Real-time console tracking of internal FSM state execution
+    initial begin
+        $monitor("Time=%0t ns | Floor=%d | Dir_State=%b | Motor: U=%b D=%b S=%b | Door=%b | Registry Memory=%b", 
+                 $time, current_floor_out, uut.dir_state, motor_up, motor_down, motor_stop, door_open, uut.request_floor_reg);
+    end
+
+endmodule
